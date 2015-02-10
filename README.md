@@ -1,2 +1,3 @@
 # Hello-World
-First Repo
+First Repo 
+This is a demo project
