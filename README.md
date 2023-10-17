@@ -7,3 +7,15 @@ This is a demo project
     [Column(TypeName = "bigint")]
     [Index(IsUnique = true)]
     public long ContractorID { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Contractor>()
+        .HasIndex(c => c.ContractorID)
+        .IsUnique();
+
+    modelBuilder.Entity<Contractor>()
+        .Property(c => c.ContractorID)
+        .IsRequired();
+}
+
