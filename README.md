@@ -28,3 +28,13 @@ This is a demo project
             })
             .ToList();
 
+
+
+
+{
+    "IsEncrypted": false,
+    "Values": {
+        "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+        "FUNCTIONS_WORKER_RUNTIME": "dotnet"
+    }
+}
