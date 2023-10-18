@@ -19,3 +19,12 @@ This is a demo project
         .IsRequired();
 }
 
+
+        payload.presentplans = payload.presentplans
+            .Select(plan => new Plan
+            {
+                rates = Math.Round(plan.rates, 2),
+                Name = plan.Name
+            })
+            .ToList();
+
