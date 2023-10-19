@@ -1,5 +1,8 @@
 dotnet ef dbcontext scaffold "YourConnectionString" Microsoft.EntityFrameworkCore.SqlServer --table table1,table2 --output-dir Models
 
+Scaffold-DbContext "YourConnectionString" Microsoft.EntityFrameworkCore.SqlServer -Tables table1,table2 -OutputDir Models
+
+
 
     [Required]
     [Column(TypeName = "bigint")]
