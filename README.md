@@ -2,7 +2,21 @@ dotnet ef dbcontext scaffold "YourConnectionString" Microsoft.EntityFrameworkCor
 
 Scaffold-DbContext "YourConnectionString" Microsoft.EntityFrameworkCore.SqlServer -Tables table1,table2 -OutputDir Models
 
+catch (DbUpdateException e) {
+    var sqlException = e.GetBaseException() as SqlException;
+    if (sqlException != null) {
+        if (sqlException .Errors.Count > 0) {
+            switch (sqlException .Errors[0].Number) {
+                case 547: // Foreign Key violation
+                    ModelState.AddModelError("CodeInUse", "Country code could not be deleted, because it is in use");
+                    return View(viewModel.First());
+                default: 
+                    throw;      
+            }
+        }
+    }
 
+    
 
     [Required]
     [Column(TypeName = "bigint")]
