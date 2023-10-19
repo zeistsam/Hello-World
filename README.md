@@ -1,6 +1,4 @@
-# Hello-World
-First Repo 
-This is a demo project
+dotnet ef dbcontext scaffold "YourConnectionString" Microsoft.EntityFrameworkCore.SqlServer --table table1,table2 --output-dir Models
 
 
     [Required]
