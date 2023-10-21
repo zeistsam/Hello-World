@@ -22,5 +22,11 @@ public class Class1
             Console.WriteLine("Feature 2022 - Hello World")
             
         }
+
+        if (false)
+        {
+            Console.WriteLine(  "Feature 2022---false");
+            
+        }
     }
 }
