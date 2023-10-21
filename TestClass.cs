@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Runtime.InteropServices;
 
 public class Class1
 {
@@ -28,5 +29,11 @@ public class Class1
             Console.WriteLine(  "Feature 2022---false");
             
         }
+    }
+
+    class Feature2022
+    {
+        CurrencyWrapper currency;
+        Console.WriteLine( "to do"); 
     }
 }
