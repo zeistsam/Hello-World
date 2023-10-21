@@ -36,4 +36,10 @@ public class Class1
         CurrencyWrapper currency;
         Console.WriteLine( "to do"); 
     }
+
+    class Feature2019
+    {
+        Console.WriteLine("Change1");
+
+    }
 }
