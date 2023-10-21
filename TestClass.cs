@@ -16,5 +16,12 @@ public class Class1
     public Class2()
     {
         Console.WriteLine("This is a Test Class file from 2022-02");
+
+        if (true)
+        {
+            Console.WriteLine("Feature 2022 - Hello World")
+            
+        }
+
     }
 }
