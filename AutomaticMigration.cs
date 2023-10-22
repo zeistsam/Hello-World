@@ -29,3 +29,5 @@ public class Startup : FunctionsStartup
         }
     }
 }
+
+//Use migrations understanding
