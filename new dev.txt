@@ -1,3 +1,13 @@
 this is part of dev
 
 Added more text 
+
+{
+        // Prepare the chat request with system and user messages
+        var chatRequest = new ChatCompletionsOptions
+        {
+            Messages = {
+                new ChatMessage(ChatRole.System, "You are an assistant specialized in named entity recognition (NER). Extract entities from the text and classify them as 'Person', 'Organization', 'Location', etc."),
+                new ChatMessage(ChatRole.User, $"Extract all entities from the following text:\n\n{text}\n\nReturn the result as a JSON array of objects with 'entity_name' and 'entity_type'.")
+            }
+        };
