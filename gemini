@@ -1,0 +1,232 @@
+using HtmlAgilityPack;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+
+public class HtmlProcessor
+{
+    /// <summary>
+    /// Represents a word/phrase to find, its optional replacement, and highlighting options.
+    /// </summary>
+    public class SearchTerm
+    {
+        public string Phrase { get; set; }
+        public string Replacement { get; set; } // If null, don't replace
+        public bool Highlight { get; set; }
+        public string HighlightStyle { get; set; } = "background-color: yellow;"; // Default highlight style
+        public Occurrence TargetOccurrence { get; set; } = Occurrence.All; // Which occurrence to target
+        public int SpecificOccurrenceIndex { get; set; } = -1; // 0-based index for Specific occurrence
+
+        // Defines which occurrence(s) to target
+        public enum Occurrence
+        {
+            All,
+            First,
+            Specific,
+            // Add more as needed, e.g., Last, Range
+        }
+    }
+
+    /// <summary>
+    /// Processes an HTML file to find, replace, and highlight specified words/phrases.
+    /// </summary>
+    /// <param name="htmlFilePath">Path to the input HTML file.</param>
+    /// <param name="outputFilePath">Path to save the modified HTML file.</param>
+    /// <param name="termsToProcess">List of SearchTerm objects defining what to find/replace/highlight.</param>
+    public void ProcessHtmlFile(string htmlFilePath, string outputFilePath, List<SearchTerm> termsToProcess)
+    {
+        if (!File.Exists(htmlFilePath))
+        {
+            throw new FileNotFoundException($"HTML file not found at: {htmlFilePath}");
+        }
+
+        var doc = new HtmlDocument();
+        doc.Load(htmlFilePath);
+
+        // Sort terms by length in descending order to handle overlapping cases (e.g., "Microsoft Word" before "Microsoft")
+        var sortedTerms = termsToProcess.OrderByDescending(t => t.Phrase.Length).ToList();
+
+        // Iterate through all text nodes in the document
+        // We collect them first to avoid issues with modifying the collection during iteration
+        var textNodes = doc.DocumentNode.SelectNodes("//text()")?.ToList();
+
+        if (textNodes == null)
+        {
+            Console.WriteLine("No text nodes found in the HTML document.");
+            doc.Save(outputFilePath); // Save original if no text to process
+            return;
+        }
+
+        foreach (var textNode in textNodes)
+        {
+            // Skip text nodes that are part of script, style, or other non-visible elements
+            if (textNode.ParentNode != null &&
+                (textNode.ParentNode.Name == "script" ||
+                 textNode.ParentNode.Name == "style" ||
+                 textNode.ParentNode.Name == "textarea")) // Add more as needed
+            {
+                continue;
+            }
+
+            // Get the current text content
+            string originalText = textNode.Original_InnerHtml; // Use Original_InnerHtml for text nodes
+            string currentText = originalText;
+
+            foreach (var term in sortedTerms)
+            {
+                // Use Regex for more flexible matching (e.g., whole words with \b)
+                // RegexOptions.IgnoreCase can be added if case-insensitivity is desired.
+                // Using WordBoundaries (\b) to match whole words. Remove if partial matches are allowed.
+                var regex = new Regex($@"\b{Regex.Escape(term.Phrase)}\b", RegexOptions.Compiled);
+                var matches = regex.Matches(currentText);
+
+                if (matches.Count == 0)
+                {
+                    continue; // No match found for this term
+                }
+
+                // Prepare for replacement/highlighting by building new text
+                string newText = "";
+                int lastIndex = 0;
+                int matchCount = 0; // To track occurrences
+
+                foreach (Match match in matches)
+                {
+                    matchCount++;
+
+                    // Skip if not targeting this specific occurrence
+                    if (term.TargetOccurrence == Occurrence.First && matchCount > 1) continue;
+                    if (term.TargetOccurrence == Occurrence.Specific && matchCount - 1 != term.SpecificOccurrenceIndex) continue;
+
+                    // Append text before the current match
+                    newText += currentText.Substring(lastIndex, match.Index - lastIndex);
+
+                    string matchedWord = match.Value;
+                    string processedWord = matchedWord; // Default to the matched word
+
+                    // 2. Replace the word if a replacement is specified
+                    if (term.Replacement != null)
+                    {
+                        processedWord = term.Replacement;
+                    }
+
+                    // 4. Highlight the word if required
+                    if (term.Highlight)
+                    {
+                        processedWord = $"<span style=\"{term.HighlightStyle}\">{processedWord}</span>";
+                    }
+
+                    newText += processedWord;
+                    lastIndex = match.Index + match.Length;
+                }
+
+                // Append any remaining text after the last match
+                newText += currentText.Substring(lastIndex);
+
+                // Update the textNode content
+                // Important: When updating, you might need to replace the text node with a new
+                // element containing the structured HTML (e.g., with <span> tags).
+                // HtmlAgilityPack's LoadHtml on the inner HTML allows re-parsing.
+                
+                // THIS IS THE CRUCIAL PART FOR HIGHLIGHTING:
+                // If highlighting occurred, the text node now contains HTML.
+                // We must create a new parent node (e.g., a div or just replace the node's content)
+                // that HtmlAgilityPack can parse correctly.
+                if (newText != originalText) // Only update if changes were made
+                {
+                    HtmlNode newContentNode = HtmlNode.CreateNode(newText);
+                    textNode.ParentNode.ReplaceChild(newContentNode, textNode);
+                    // Re-evaluate the text nodes for the next iteration as DOM might have changed
+                    // For simplicity in this example, we're not re-evaluating, but in a complex
+                    // scenario with many nested changes, you might need to re-select textNodes.
+                }
+            }
+        }
+
+        // Save the modified HTML to the output file
+        doc.Save(outputFilePath);
+        Console.WriteLine($"Processed HTML saved to: {outputFilePath}");
+    }
+
+    // --- Example Usage ---
+    public static void Main(string[] args)
+    {
+        string inputHtmlFile = "input.html";
+        string outputHtmlFile = "output.html";
+
+        // Create a dummy input.html for testing
+        File.WriteAllText(inputHtmlFile, @"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Document</title>
+    <style>
+        .highlighted {
+            background-color: yellow;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Welcome to Microsoft World!</h1>
+    <p>This document contains Microsoft Word and other Microsoft products. 
+       We love Microsoft. Microsoft is a great company.
+       This is just another paragraph with the word microsoft.</p>
+    <div>
+        <p>Some more text here. Microsoft is everywhere.</p>
+        <script>
+            var data = "Microsoft Word Data"; // This should NOT be processed
+        </script>
+    </div>
+</body>
+</html>
+");
+
+        var processor = new HtmlProcessor();
+
+        var terms = new List<SearchTerm>
+        {
+            new SearchTerm { 
+                Phrase = "Microsoft Word", 
+                Replacement = "Google Docs", 
+                Highlight = true, 
+                HighlightStyle = "background-color: #ADD8E6;" // Light blue
+            },
+            new SearchTerm { 
+                Phrase = "Microsoft", 
+                Replacement = "Windows Corp.", 
+                Highlight = true, 
+                HighlightStyle = "background-color: #90EE90;", // Light green
+                TargetOccurrence = SearchTerm.Occurrence.All // All occurrences for this term
+            },
+            new SearchTerm { 
+                Phrase = "document", 
+                Replacement = null, // No replacement
+                Highlight = true, 
+                HighlightStyle = "font-weight: bold; color: red;",
+                TargetOccurrence = SearchTerm.Occurrence.First // Only highlight the first "document"
+            },
+             new SearchTerm {
+                Phrase = "company",
+                Replacement = "corporation",
+                Highlight = false, // No highlight
+                TargetOccurrence = SearchTerm.Occurrence.Specific,
+                SpecificOccurrenceIndex = 0 // Replace the first "company" (0-indexed)
+            }
+        };
+
+        try
+        {
+            processor.ProcessHtmlFile(inputHtmlFile, outputHtmlFile, terms);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"An error occurred: {ex.Message}");
+        }
+
+        Console.WriteLine("Press any key to exit.");
+        Console.ReadKey();
+    }
+}
