@@ -1,0 +1,61 @@
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Presentation;
+using ClosedXML.Excel; // Or EPPlus
+using System.IO;
+using System.Linq;
+using System;
+
+public void ExtractChartData(string pptxFilePath)
+{
+    using (PresentationDocument ppt = PresentationDocument.Open(pptxFilePath, false))
+    {
+        foreach (SlidePart slidePart in ppt.PresentationPart.SlideParts)
+        {
+            // 1. Find all OLE Objects on the slide
+            var oleObjects = slidePart.Slide.Descendants<OleObject>();
+
+            foreach (var oleObject in oleObjects)
+            {
+                // 2. Check the ProgID (ThinkCell/Mekko often use Excel.Sheet logic or wrap it)
+                // Even if ProgID is "ThinkCell...", the underlying data is often an Excel bag.
+                string progId = oleObject.ProgId ?? "Unknown";
+                Console.WriteLine($"Found OLE Object: {progId}");
+
+                // 3. Get the relationship ID to find the binary part
+                string embedId = oleObject.Id;
+                if (string.IsNullOrEmpty(embedId)) continue;
+
+                OpenXmlPart part = slidePart.GetPartById(embedId);
+
+                // 4. Extract the stream
+                // Note: The part might be an EmbeddedPackagePart
+                if (part is EmbeddedPackagePart embeddedPackage)
+                {
+                    using (Stream stream = embeddedPackage.GetStream())
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        stream.CopyTo(ms);
+                        ms.Position = 0;
+
+                        // 5. Try to read it as Excel
+                        // Think-Cell internal datasheets are essentially Excel files.
+                        try 
+                        {
+                            using (var workbook = new XLWorkbook(ms))
+                            {
+                                var ws = workbook.Worksheets.First();
+                                Console.WriteLine($"Successfully read data from {progId}");
+                                Console.WriteLine($"Cell A1: {ws.Cell("A1").Value}");
+                                // Process your data here...
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Could not parse stream as Excel. It might be a proprietary binary. Error: {ex.Message}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
