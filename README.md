@@ -1,3 +1,5 @@
+https://chatgpt.com/share/69b15861-10b4-8005-9c50-d621a74ed0a9
+
 Test 1
 
 dotnet ef dbcontext scaffold "YourConnectionString" Microsoft.EntityFrameworkCore.SqlServer --table table1,table2 --output-dir Models
