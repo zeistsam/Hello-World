@@ -1,0 +1,175 @@
+# Systematically Mastering a Large Azure Functions + AI Foundry + Agents Python Codebase with Claude Code and Cowork
+
+## TL;DR
+- **Use a two-tool split:** Claude Cowork (desktop, cloud-run agent) for broad, read-only research, architecture write-ups and planning docs; Claude Code (terminal/IDE agent) for hands-on repo work — driving both with the official "Explore → Plan → Code → Commit" workflow, a `/init`-generated `CLAUDE.md`, read-only Explore subagents, and per-language LSP plugins so the agent navigates by symbol rather than guessing.
+- **Follow a strict comprehension order:** map the repo's top-level structure and infra-as-code first, then entry points (Azure Functions triggers/bindings in `function_app.py` + blueprints), then the agent orchestration loop (Foundry `AIProjectClient`/`agents` client → thread → run → tool-call loop) and its managed-identity/RBAC seams, and only then the business logic — verifying every AI explanation against tests, `git` history and actually running the code.
+- **Lean on your Azure/.NET strengths:** the Foundry SDK, `DefaultAzureCredential`, managed identity and RBAC concepts transfer almost 1:1 from .NET; your real ramp-up cost is Python idioms (dynamic typing, indentation scoping, `venv`/`uv` environments, decorators, async, the GIL). Have the AI explain unfamiliar Python in C#-analogous terms and you close that gap in days, not weeks.
+
+## Key Findings
+
+1. **Claude Code's official onboarding workflow is "Explore first, then plan, then code" (four phases), and it is explicitly recommended for unfamiliar codebases.** Anthropic's engineering best-practices page frames the entire tool around one constraint — "Claude's context window fills up fast, and performance degrades as it fills" — and tells you to "Separate research and planning from implementation to avoid solving the wrong problem." You enter plan mode with `Shift+Tab` (or `claude --permission-mode plan`), have Claude read files and answer questions without making changes, then ask for a written plan before any edits.
+
+2. **`CLAUDE.md` is the single highest-leverage artifact.** It is a markdown "memory" file loaded into every session; run `/init` to auto-generate a first draft (build/test commands, conventions, layout), then refine. Keep it under ~200 lines, layered (root file for the big picture, per-subdirectory files for local conventions). Anthropic's large-codebases guidance says to keep root files "pointers and critical gotchas only" and to **initialize in subdirectories, not the repo root**, because Claude walks up the tree and loads every ancestor `CLAUDE.md` automatically.
+
+3. **Subagents split exploration from editing** — the built-in read-only **Explore** subagent "runs on Haiku for speed and low cost, is denied the Write and Edit tools," and when invoked "specifies a thoroughness level: quick, medium, or very thorough. Explore skips your CLAUDE.md files and the parent's git status to keep research cheap." It searches the codebase and returns a synthesized summary instead of dumping twenty files into your main context — the key mechanism for understanding a large repo without blowing the context window. Practitioner guidance puts the practical concurrency ceiling at "three to five concurrent subagents… beyond that you spend more time merging summaries than you save," with subagent nesting depth capped at 5.
+
+4. **Claude Cowork is a complementary, higher-level agent, not a code editor.** It lives in the Claude Desktop app (Chat / Cowork / Code tabs), runs tasks in an isolated cloud sandbox, reads/writes only the local folders you authorize, and is strongest at research synthesis, document/report generation, and planning across many files. Anthropic positions it as: "Cowork is for knowledge work, Claude Code is for software development." Anthropic's own usage data (1.2 million anonymized Cowork sessions, May 11–31, 2026, across 600,000+ organizations) found software development was only 8.7% of Cowork usage — reinforcing that its sweet spot is knowledge work, not hands-on coding.
+
+5. **The Azure system has a very learnable shape.** Azure Functions Python **v2 programming model** uses decorators in `function_app.py` (plus **blueprints** for multi-file organization) — no more `function.json`. Azure AI Foundry's Agent Service is a **stateful** runtime: you create an **Agent** (instructions + model + tools), a **Thread** (conversation), and a **Run** (the think→act→observe loop), and your code polls the run and services `requires_action` tool calls in a loop. Auth uses `DefaultAzureCredential` locally (via `az login`) and managed identity + RBAC in production — concepts you already know from .NET.
+
+6. **The tool landscape is mature but Claude Code leads on large-codebase comprehension.** As of mid-2026, Claude Code (default model **Claude Sonnet 5**, 1M-token context) is widely rated best for whole-codebase understanding and autonomous multi-file work; Cursor is the day-to-day IDE favorite; GitHub Copilot wins on GitHub-native integration and price; OpenAI Codex (GPT-5.x) is a strong cloud-parallel alternative; Amazon Q Developer is AWS-centric and now being retired (new signups blocked May 15, 2026); Windsurf, JetBrains AI, Sourcegraph Cody and Continue.dev fill specific niches.
+
+## Details
+
+### 1. Claude Code capabilities & best practices for onboarding (mid-to-late 2026)
+
+**Versions and models.** As of mid-August 2026 the Claude Code CLI is in the **v2.1.23x** range (the changelog's newest entry is **v2.1.232, dated August 13, 2026**); confirm locally with `claude --version`. The default model is **Claude Sonnet 5** (launched June 30, 2026; native **1M-token context window**, up to 128K output), with **Opus 5** one `/model` switch away for the hardest reasoning. Because features move weekly, treat specific version/model claims as fast-moving and verify against `claude --version` and the official changelog.
+
+**The four-phase workflow (official).** From Anthropic's engineering best-practices page:
+- **Explore** — enter plan mode (`Shift+Tab` until `⏸ plan mode on`, or `claude --permission-mode plan`); "Claude reads files and answers questions without making changes." Example prompt: *"read /src/auth and understand how we handle sessions and login. also look at how we manage environment variables for secrets."*
+- **Plan** — "Ask Claude to create a detailed implementation plan." Press `Ctrl+G` to open the plan in your editor and edit it directly before proceeding.
+- **Implement** — approve the plan / exit plan mode, then let Claude code, verifying against its plan.
+- **Commit** — ask Claude to commit with a descriptive message and open a PR.
+
+**"Ask codebase questions" is an explicit onboarding use case.** The docs say: "When onboarding to a new codebase, use Claude Code for learning and exploration. You can ask Claude the same sorts of questions you would ask another engineer" (e.g., "How does logging work?", "How do I make a new API endpoint?"), and that "Using Claude Code this way is an effective onboarding workflow, improving ramp-up time and reducing load on other engineers."
+
+**Memory system.** Two complementary mechanisms carry knowledge across sessions: **`CLAUDE.md` files** (you write them; loaded every session) and **auto memory** (Claude writes notes itself based on your corrections; stored per-repo under `~/.claude/projects/<project>/memory/`, with the first 200 lines / 25 KB of `MEMORY.md` loaded each session). `CLAUDE.md` scopes, in load order: managed policy → user (`~/.claude/CLAUDE.md`) → project (`./CLAUDE.md` or `./.claude/CLAUDE.md`) → local (`./CLAUDE.local.md`, gitignored). Run `/init` to bootstrap it, `/context` to confirm what loaded, `/memory` to view/edit, and `/doctor` to trim a bloated file. For big repos, split instructions into path-scoped `.claude/rules/*.md` that load only when Claude touches matching files.
+
+**`/init` interactive flow.** Beyond the default `/init` (which analyzes the codebase and writes a starter `CLAUDE.md`), setting `CLAUDE_CODE_NEW_INIT=1` enables a research-preview multi-phase flow that asks which artifacts to set up (CLAUDE.md, skills, hooks), explores the codebase with a subagent, asks follow-up questions, and presents a reviewable proposal before writing files. *(This interactive behavior is a research preview reported largely via community/tech-blog coverage of an Anthropic preview announced March 23, 2026; the default `/init` is officially documented.)*
+
+**`/team-onboarding` command.** A built-in command (shipped in **Claude Code v2.1.101**) that generates a teammate ramp-up guide by inspecting your `CLAUDE.md`, installed skills, subagents, hooks, and roughly the last 30 days of local Claude Code usage. Useful to run once you (or a teammate who knows the repo) have used Claude Code on it for a while. *(Documented via changelog/community testing; not yet in the official commands reference at time of writing.)*
+
+**The "harness" matters as much as the model.** Anthropic's large-codebases article lays out five extension points, in build order: **CLAUDE.md** (context every session) → **hooks** (deterministic scripts at lifecycle events; also self-improving — a stop hook can propose CLAUDE.md updates) → **skills** (packaged, on-demand expertise via progressive disclosure; can be path-scoped) → **plugins** (bundle skills/hooks/MCP for org-wide distribution) → **MCP servers** (connect Claude to databases, GitHub, Jira, internal APIs). Two more capabilities round it out: **LSP integrations** (symbol-level "go to definition"/"find references" so Claude searches by symbol, not string) and **subagents**.
+
+**Agentic search, not RAG.** Claude Code "navigates a codebase the way a software engineer would: it traverses the file system, reads files, uses grep… and follows references," working from the live codebase with no index to build or stale embeddings — an advantage in an actively developed repo, but one that "works best when Claude has enough starting context to know where to look" (hence the CLAUDE.md investment).
+
+**Diagrams & maps.** Claude Code can generate Mermaid architecture/sequence/flow diagrams from code analysis (either natively into markdown, or via a Mermaid MCP server/connector), and Anthropic recommends a lightweight root markdown "codebase map" (each top-level folder + a one-line description) when the directory structure isn't self-explanatory.
+
+**Large/multi-repo features (official `large-codebases` docs).** Start Claude in the subdirectory you're working in; layer `CLAUDE.md` by directory; use `claudeMdExcludes` to skip other teams' files; install **code-intelligence (LSP) plugins** from the official marketplace (`/plugin install typescript-lsp@claude-plugins-official`, and separately install the language-server binary — e.g. Pyright/Pylsp for Python); use `--add-dir`/`additionalDirectories` to reach sibling repos; and use `worktree.sparsePaths` + subagent worktree isolation for lightweight checkouts.
+
+### 2. Claude Cowork — what it's for, and how to combine it with Claude Code
+
+**What it is.** Cowork is Anthropic's agentic knowledge-work app, introduced **January 12, 2026 as a research preview**, generally available on every paid plan (Pro through Max) via the Claude Desktop app on macOS and Windows, with web/mobile in beta for Max subscribers **from July 7, 2026**. It runs tasks in an **isolated cloud sandbox** on Anthropic's servers that "can't reach your home or company network," reaching your machine only for the specific local folders you connect through the desktop app. It plans, breaks work into subtasks, runs code/shell in its sandbox, coordinates parallel workstreams, and can run scheduled/recurring jobs.
+
+**What it's good at vs. Claude Code.** Anthropic's framing: "Cowork is for knowledge work, Claude Code is for software development. Cowork organizes files, creates documents, analyzes data. Claude Code writes code, runs tests, manages Git repositories." Cowork is "particularly effective for research-heavy workflows where context is spread across many files" — it can read across an entire folder of documents, "synthesize key themes, compare findings, or generate a structured report," "highlight contradictions, and surface patterns," and supports "long-running tasks without chat timeouts." A published Cowork workflow template does exactly "research a specified topic, create a report including an Executive Summary, background, current status, impact, and recommended actions, and save it locally."
+
+**Can it do codebase research?** Yes, at the *higher/documentation* level. Cowork can read a repo folder you authorize and produce architecture briefs, onboarding docs, glossaries, and plans — and its **project-level context** (drop your files into a project once and converse) is what users cite as the key difference from plain chat. But it is not the tool for symbol-precise navigation, running the test suite against your live checkout, or committing code — that's Claude Code, which shares the same `CLAUDE.md`/settings/MCP configuration across surfaces.
+
+**Recommended combined workflow.** Use **Cowork for the "outer loop"**: point it at the repo (and any design docs/Confluence exports/tickets) and have it produce a written architecture overview, a data-flow narrative, a dependency inventory, an onboarding guide, and a prioritized "areas to understand first" list — deliverables that live as markdown you keep. Then use **Claude Code for the "inner loop"**: verify and deepen those docs against the live code, generate `CLAUDE.md`, run tests, trace the agent loop, and build features. Feed Cowork's outputs into Claude Code's `CLAUDE.md`/`docs/` so both tools share ground truth.
+
+### 3. A concrete, phased methodology for understanding a large unfamiliar codebase
+
+The governing principle (from Anthropic's own testing, as reported in practitioner write-ups): unguided agent attempts succeed only about a third of the time, and a feature with ~20 decision points at 80% each lands all-correct only ~1% of the time — so **plan first, verify relentlessly, commit in small increments**.
+
+**Phase A — Orient from the outside in (read-only).**
+1. `git clone`, then before opening any file, ask Claude Code (in plan mode) or Cowork for a top-level tour: "List every top-level directory with a one-line description of what lives there. Identify the language(s), package manager, build/test/lint commands, and the main entry points. Don't write code."
+2. Read the "table of contents" artifacts a human would: `README`, `pyproject.toml`/`requirements.txt`, `host.json`, `local.settings.json` (structure only), CI/CD YAML, Bicep/Terraform/ARM, `Dockerfile`, and any `docs/`.
+3. Have the agent produce a **repo map** and a **Mermaid architecture diagram**, saved to `docs/architecture.md`.
+
+**Phase B — Infrastructure & configuration as code.** Map what the system *is* before what it *does*: which Azure resources are provisioned (Function App, Foundry project, Storage, App Insights, Key Vault), what settings/env vars the code expects, and where secrets/identities come from. This is your home turf — leverage it.
+
+**Phase C — Entry points & data flow.** Identify every trigger (HTTP/timer/queue/blob/Durable) and follow one representative request end-to-end: trigger → handler → orchestration → external calls → response. Ask for a **sequence diagram** per major flow.
+
+**Phase D — Core domain / agent orchestration.** Now go deep on the agentic heart (see §4).
+
+**Phase E — Business logic, edge cases, tests.** Read the tests as executable documentation of intended behavior; have the agent summarize what each test module asserts.
+
+**Prompting strategies that work.**
+- **Delegate research to subagents:** "Use the Explore subagent to map how agents are registered and invoked; report a summary, not the files."
+- **Force grounding:** instruct Claude to cite file paths and line numbers for every claim, and to quote the actual code — "if you can't find a supporting quote, say so." (Anthropic's own hallucination guidance: allow "I don't know," ground answers in direct quotes, verify with citations, use best-of-N and chain-of-thought verification.)
+- **Use plan mode for anything multi-file or unfamiliar;** skip it only when you can describe the diff in one sentence.
+- **Ask for C#-analogous explanations** (see §5).
+
+**Verifying the AI isn't hallucinating.** The dangerous failures "arrive inside work that's 95 percent correct, in the same confident voice." Countermeasures:
+- **"No receipts, no belief"** — require command output/test results, not claimed success. The community "no-hallucination" hook set literally blocks a "tests pass" claim unless tests actually ran.
+- **Cross-reference with `git`** — `git blame`/`git log` to confirm code age and intent; a subagent can review history for context.
+- **Run the code** — the ultimate check; stand up the local loop early (Stage 0 below).
+- **Check version-specific APIs against current docs** — invented/deprecated SDK methods are the classic Python fabrication; "suspicion should scale with obscurity."
+- **Cross-model review** — some teams have a second agent (e.g. Codex) review Claude's output, treating the review as advisory.
+- **Calibrate scrutiny to blast radius** — light review for boilerplate; full "receipts" for anything touching auth, RBAC, payments, or data deletion.
+
+### 4. Azure Functions + Azure AI Foundry + Agents: what to map first
+
+**Function App shape (v2 model).** Triggers and bindings are Python **decorators** in `function_app.py` (e.g. `@app.route(...)`, `@app.queue_output(...)`), replacing v1's per-function folder + `function.json`. Large apps organize functions into **blueprints** (`azure.functions.Blueprint`, conceptually like FastAPI routers / ASP.NET controllers) registered onto the main `FunctionApp`. HTTP routes are prefixed `/api/` by default (set in `host.json`). If the code uses **Durable Functions**, look for orchestrator/activity/entity triggers (`@app.orchestration_trigger`, etc.) via `DFApp` — Durable is commonly used to add human-in-the-loop and long-running workflow reliability around Foundry agents. **Map first:** every trigger, its binding directions (in/out), the route table, and which blueprints exist.
+
+**Foundry Agent Service model.** The SDK is **`azure-ai-projects`** (the `AIProjectClient`, part of the Microsoft Foundry SDK), with agent operations under `.agents`; some code uses the lower-level **`azure-ai-agents`** (`AgentsClient`) directly, and agents now use an extension of the OpenAI Responses protocol (so you may also see `.get_openai_client()`). The core stateful objects:
+- **Agent** — instructions (system prompt) + model deployment + tools.
+- **Thread** — a persistent conversation that stores messages and manages context windowing.
+- **Run** — an invocation of an agent on a thread; the service runs the think→act→observe loop.
+- **Tools** — Code Interpreter, File Search (managed RAG), and **Function Calling** (custom tools).
+
+**The tool-calling loop is the thing to understand.** With custom function tools, the code creates a thread, adds a user message, creates a run, then **polls** while `run.status in ("queued","in_progress","requires_action")`; on `requires_action` it reads `run.required_action.submit_tool_outputs.tool_calls`, executes each named local Python function with the JSON args, and submits outputs back — repeating until completion. (Higher-level SDKs like `create_and_process` or the **Microsoft Agent Framework** — the open-source successor to Semantic Kernel/AutoGen — hide this loop and add multi-agent orchestration patterns: sequential, concurrent, handoff, group-chat.) **Map first:** where the run loop lives, how tools are registered (a `toolset`/`ConnectedAgentTool`/`@tool` decorator), the mapping from tool name → Python callable, and whether orchestration is single-agent or multi-agent.
+
+**Identity & RBAC integration points (your wheelhouse).** Auth flows through **`azure-identity`**'s `DefaultAzureCredential`, which tries a chain (environment vars → managed identity → VS Code → `az login` CLI → etc.). Locally you authenticate with `az login`; in production the Function App uses **managed identity** (system- or user-assigned; for user-assigned, look for `managed_identity_client_id`/`AZURE_CLIENT_ID`). The identity needs Azure **RBAC** roles on the Foundry project/resource (and on Storage, Key Vault, AI Search, etc.). **Map first:** where `DefaultAzureCredential` is constructed, what the `AZURE_AI_PROJECT_ENDPOINT`/`AZURE_AI_MODEL_DEPLOYMENT_NAME` env vars point to, which connected resources (`.connections`) the project uses, and whether App Insights tracing is wired via `AIProjectInstrumentor().instrument()`.
+
+**Observability.** Foundry supports OpenTelemetry-based tracing to Application Insights; if enabled, use the traces to *verify* which tools ran with which inputs/outputs — an excellent hallucination check for both the app's agents and your understanding of them.
+
+### 5. Ramping up fast: strong Azure/.NET engineer, basic Python
+
+**What transfers almost directly.** Both languages are strongly typed and share `if/else/while/for`, `async`/`await` (Python's was inspired by C#'s), pattern matching (`match` ≈ switch expressions), and LINQ-like operations (via `itertools`/comprehensions). The entire Azure identity/RBAC/managed-identity model and the Foundry SDK shape are the same concepts you know from .NET; even `DefaultAzureCredential` exists in both.
+
+**The gotchas that trip up .NET engineers:**
+- **Dynamic typing.** A variable's type can change on reassignment; there's no compiler catching type errors. Type hints exist but are *not enforced at runtime* — treat them as documentation. Add `mypy`/`pyright` and Ruff to get closer to a compiler-like safety net.
+- **Indentation is syntax.** Blocks are defined by whitespace (4 spaces), not braces. Mixed tabs/spaces break code.
+- **Naming conventions.** `snake_case` for functions/variables/modules, `PascalCase` for classes, single leading underscore `_x` = "protected by convention," double `__x` = name-mangled. There's no `private` keyword — encapsulation is a convention.
+- **Environments & dependencies.** No global assembly cache / centralized `.csproj`; instead each project uses an isolated **virtual environment** (`python -m venv .venv` then activate; or the faster Rust-based **`uv`**, increasingly the 2026 default) plus `requirements.txt`/`pyproject.toml` + a lockfile. Never commit `.venv`. `pip install -r requirements.txt` (or `uv sync`) restores deps. This is the #1 practical stumbling block — get the venv right first.
+- **The GIL.** CPython's Global Interpreter Lock means threads don't give true CPU parallelism; Python code uses `asyncio` for I/O concurrency and `multiprocessing` for CPU parallelism. Highly relevant in a Functions app doing concurrent I/O to Foundry.
+- **No `new`, properties are just attributes, `self` is explicit**, truthiness of empty collections, `for/else`, and duck typing instead of interfaces.
+- **Web-framework analogies:** ASP.NET Core controllers ≈ FastAPI/Flask routes or Functions blueprints; Entity Framework ≈ SQLAlchemy; NuGet ≈ pip/PyPI.
+
+**Use the AI to bridge the gap.** Add to `CLAUDE.md`: *"When explaining Python code, include the closest C#/.NET analogy and call out idioms that differ from C#."* Then ask things like "Explain this decorator as if I know C# attributes/middleware," or "What's the C# equivalent of this list comprehension / context manager (`with`)?" This turns your deep C# mental models into an accelerant rather than a source of confusion. Keep verifying — the AI is most likely to hallucinate in exactly the areas you can't yet check yourself, so run the code.
+
+### 6. The 2026 AI coding-assistant landscape
+
+| Tool | Model(s) | Strength for large-codebase comprehension | Best role in your workflow |
+|---|---|---|---|
+| **Claude Code** | Sonnet 5 default, Opus 5 optional; 1M context | **Best-in-class** — agentic search, subagents, LSP; Sonnet 5 scored 72.7% on SWE-bench Verified (Anthropic, June 30 2026) | Primary hands-on repo tool |
+| **Claude Cowork** | Opus-class, desktop cloud agent | Strong for *documentation-level* synthesis across many files | Outer-loop research/planning/docs |
+| **Cursor** | Multi-model (incl. Claude, GPT-5.x) | Strong project indexing (~200K–500K tokens), great visual multi-file edits | Day-to-day IDE editing if you want a GUI diff loop |
+| **GitHub Copilot** | Multi-model selector | Workspace indexing (~128K–200K); Chat/Agent mode, issue→PR agent | If your org is GitHub-native; cheap per-seat; PR review |
+| **OpenAI Codex** | GPT-5.5/5.x-Codex | Cloud-parallel background tasks, own sandboxes → PRs; good cross-tool reviewer | Supplementary / second-opinion review agent |
+| **Windsurf** | Multi-model (Cascade agent) | Good cross-codebase context, autonomous multi-file "Cascade" | Alt AI-native IDE |
+| **JetBrains AI** | Multi-model | Native across PyCharm etc.; deepest IDE integration | If you prefer PyCharm for Python |
+| **Sourcegraph Cody** | Multi-model | Enterprise **code search / multi-repo** context | Multi-repo code search at scale |
+| **Continue.dev** | Any model, incl. local via Ollama | Config-driven; only fully air-gapped option | Privacy-constrained/local-model needs |
+| **Amazon Q Developer** | AWS-centric | AWS-native; being retired — new signups blocked May 15 2026, end-of-support April 30 2027 (successor: Kiro) | Not recommended for an Azure shop |
+
+**Interpretation.** For *comprehension* of a large, unfamiliar Azure/Python repo, Claude Code's live agentic search + subagents + 1M context is the strongest single choice, with Cursor a close second if you want a visual editor. For *incremental feature-building* the field narrows to preference: Claude Code (terminal/agentic), Cursor (IDE), or Copilot (GitHub-native). A common 2026 pattern is to **combine**: Claude Code/Cowork for deep understanding and big changes, a fast IDE (Cursor/Copilot) for routine editing, and occasionally a cross-provider reviewer (Codex) to catch the other model's mistakes.
+
+## Recommendations
+
+A concrete, ~4-week staged plan. Benchmarks that change the plan are in *italics*.
+
+**Stage 0 — Setup (Day 1).**
+- Install the Claude Desktop app (for Cowork) and Claude Code (terminal + your IDE extension). Sign in on a paid plan.
+- Get the repo running locally *first*: create the venv (`python -m venv .venv` / `uv venv`), install deps, install Azure Functions Core Tools, `az login`, and populate `local.settings.json` from a teammate or Key Vault. **Benchmark:** you can start the Functions host locally and hit one endpoint. *If you can't run it locally by end of Day 2, escalate to a teammate — a working loop is the foundation for all verification.*
+- Install a Python **LSP/code-intelligence plugin** in Claude Code and the Pyright/Pylance language server.
+
+**Stage 1 — Broad map (Days 2–4).**
+- In **Cowork**, authorize the repo folder (plus any design docs/tickets) and commission: an architecture overview, a dependency inventory, a data-flow narrative, and a prioritized "understand-first" list. Save as markdown.
+- In **Claude Code plan mode**, generate `docs/architecture.md` + Mermaid diagrams and run `/init` to create a first `CLAUDE.md`. Add the C#-analogy instruction and the exact test/lint/run commands.
+- **Benchmark:** you can draw the request path from trigger to response on a whiteboard.
+
+**Stage 2 — Infra & identity (Days 4–6).**
+- Map all IaC, env vars, connected Azure resources, and every `DefaultAzureCredential`/managed-identity/RBAC seam. Document the local-vs-prod auth story. (This is your strongest area — go fast and become the team's reference here.)
+
+**Stage 3 — The agent loop (Week 2).**
+- Use the Explore subagent to map agent registration, the thread/run tool-calling loop, tool→callable mappings, and single- vs multi-agent orchestration. Trace one full run with logging/App Insights traces to *verify* the AI's explanation. **Benchmark:** you can explain, with file references, what happens on one user request from HTTP trigger through a tool call and back.
+
+**Stage 4 — Business logic & tests (Week 2–3).**
+- Read tests as spec; have the agent summarize assertions per module. Fill gaps in `CLAUDE.md`/auto memory as you correct the AI.
+
+**Stage 5 — First feature (Week 3–4).**
+- Pick a small, low-blast-radius feature (ideally a new function tool or endpoint). Run the full Explore→Plan→Code→Commit loop in a git worktree/branch. Write/extend tests; require "receipts" (real test output) before believing "done." Open a PR; optionally have a second model review it. **Benchmark:** merged PR with passing tests and a teammate's approval. *If the AI's diff touches auth/RBAC/data deletion, switch to full manual review regardless of confidence.*
+
+**Ongoing thresholds.**
+- Re-review your `CLAUDE.md`/skills every 3–6 months or after major model releases (older workarounds can hurt newer models).
+- If context/performance degrades on huge subtrees, scope Claude to subdirectories and lean harder on LSP + subagents; keep concurrent subagents to ~3–5.
+- If you find yourself unable to verify the AI's Python explanations, slow down and run more code — don't accept confident prose in areas you can't yet check.
+
+## Caveats
+- **Fast-moving products.** Claude Code version (~v2.1.232, Aug 13 2026) and default model (Sonnet 5) will change; verify with `claude --version`, the official changelog, and `/model`. Cowork was still labeled a research preview in parts of 2026 (complex spreadsheet parsing and some connectors were noted as rough), and web/mobile are in beta.
+- **Sourcing strength varies.** The four-phase workflow, memory system, and large-codebases guidance are from official Anthropic docs. `/team-onboarding` (v2.1.101) is documented via changelog/community testing, and the interactive `CLAUDE_CODE_NEW_INIT=1` `/init` flow is a research preview reported mainly through tech-blog coverage — treat both as subject to change and verify in your installed version.
+- **Benchmark numbers.** Sonnet 5's 72.7% SWE-bench Verified is Anthropic's own June 30 2026 launch figure; higher numbers (e.g., ~80.8%) circulate in third-party comparisons and are unverified — use benchmarks directionally. Context-window sizes quoted for Cursor/Copilot are third-party estimates.
+- **Foundry SDK churn.** `azure-ai-projects`/`azure-ai-agents` are evolving (several features marked preview, and agents moving onto the OpenAI Responses protocol); pin versions from the repo's lockfile and check the installed package's README rather than assuming the newest API shape.
+- **Don't let the AI grade its own homework.** Every capability and API claim in an AI's explanation of your codebase should be verified against tests, `git` history, running code, or official docs — especially in Python areas outside your current fluency.
